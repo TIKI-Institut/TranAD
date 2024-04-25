@@ -145,8 +145,8 @@ class OmniAnomaly(nn.Module):
 			nn.Linear(self.n_hidden, self.n_feats), nn.Sigmoid(),
 		)
 
-	def forward(self, x, hidden = None):
-		hidden = torch.rand(2, 1, self.n_hidden, dtype=torch.float64) if hidden is not None else hidden
+	def forward(self, x, hidden = None, device="cpu"):
+		hidden = torch.rand(2, 1, self.n_hidden, dtype=torch.float64, device=device) if hidden is not None else hidden
 		out, hidden = self.lstm(x.view(1, 1, -1), hidden)
 		## Encode
 		x = self.encoder(out)

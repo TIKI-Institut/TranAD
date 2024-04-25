@@ -33,6 +33,34 @@ def load_dataset(dataset, device):
     folder = os.path.join(output_folder, dataset)
     if not os.path.exists(folder):
         raise Exception('Processed Data not found.')
+
+    if dataset == "TIKI":
+        # get files from the folder
+        files = os.listdir(folder)
+        # load the data
+        df = pd.read_csv(os.path.join(folder, files[0]))
+
+        #remove timestamp column
+        df = df.drop(columns=['timestamp'])
+        n_rows = df.shape[0]
+
+        train_tensor = torch.tensor(df.values[:int(n_rows*0.7)]).to(device)
+        #val_tensor = torch.tensor(df.values[int(n_rows*0.7):int(n_rows*0.9)]).to(device)
+        test_tensor = torch.tensor(df.values[int(n_rows*0.995):]).to(device)
+
+        # tiki_labels should be mock with shape like test_tensor but numpy
+        tiki_labels = np.zeros(test_tensor.shape)
+
+        print(f"Train shape: {train_tensor.shape}")
+        print(f"Test shape: {test_tensor.shape}")
+        print(f"Labels shape: {tiki_labels.shape}")
+
+        train_loader = DataLoader(train_tensor, batch_size=train_tensor.shape[0])
+        #val_loader = DataLoader(val_tensor, batch_size=val_tensor.shape[0])
+        test_loader = DataLoader(test_tensor, batch_size=test_tensor.shape[0])
+
+        return train_loader, test_loader, tiki_labels
+
     loader = []
     for file in ['train', 'test', 'labels']:
         if dataset == 'SMD':
@@ -158,7 +186,10 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
         if training:
             mses, klds = [], []
             for i, d in enumerate(data):
-                y_pred, mu, logvar, hidden = model(d, hidden if i else None)
+                if i: 
+                    y_pred, mu, logvar, hidden = model(d, hidden, device)
+                else:
+                     y_pred, mu, logvar, hidden = model(d, None, device)
                 MSE = l(y_pred, d)
                 KLD = -0.5 * torch.sum(1 + logvar -
                                        mu.pow(2) - logvar.exp(), dim=0)
@@ -176,11 +207,14 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
         else:
             y_preds = []
             for i, d in enumerate(data):
-                y_pred, _, _, hidden = model(d, hidden if i else None)
+                if i: 
+                    y_pred, mu, logvar, hidden = model(d, hidden, device)
+                else:
+                     y_pred, mu, logvar, hidden = model(d, None, device)
                 y_preds.append(y_pred)
             y_pred = torch.stack(y_preds)
             MSE = l(y_pred, data)
-            return MSE.detach().numpy(), y_pred.detach().numpy()
+            return MSE.cpu().detach().numpy(), y_pred.cpu().detach().numpy()
     elif 'USAD' in model.name:
         l = nn.MSELoss(reduction='none')
         n = epoch + 1
@@ -293,7 +327,8 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             return loss.detach().numpy(), y_pred.detach().numpy()
     elif 'TranAD' in model.name:
         l = nn.MSELoss(reduction='none')
-        dataset = TensorDataset(data,data)
+        mock_labels = torch.zeros_like(data)
+        dataset = TensorDataset(data, mock_labels)
         bs = model.batch if training else len(data)
         dataloader = DataLoader(dataset, batch_size=bs)
         n = epoch + 1
@@ -304,6 +339,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
                 local_bs = d.shape[0]
                 window = d.permute(1, 0, 2)
                 elem = window[-1, :, :].view(1, local_bs, feats)
+                #random_window = torch.rand_like(window)
                 z = model(window, elem)
                 l1 = l(z, elem) if not isinstance(z, tuple) else (
                     1 / n) * l(z[0], elem) + (1 - 1/n) * l(z[1], elem)
@@ -320,6 +356,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
         else:
             for d, _ in dataloader:
                 window = d.permute(1, 0, 2)
+                #random_window = torch.rand_like(window)
                 elem = window[-1, :, :].view(1, bs, feats)
                 z = model(window, elem)
                 if isinstance(z, tuple):
@@ -339,10 +376,11 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
         else:
             return loss.detach().numpy(), y_pred.detach().numpy()
 
-
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #device = "cpu"
     print(f"Using device: {device}")
+    
     
     train_loader, test_loader, labels = load_dataset(args.dataset, device)
     if args.model in ['MERLIN']:
@@ -353,21 +391,18 @@ if __name__ == '__main__':
     trainD, testD = next(iter(train_loader)), next(iter(test_loader))
     trainO, testO = trainD, testD
     if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT', 'MAD_GAN'] or 'TranAD' in model.name:
-        trainD, testD = convert_to_windows(
-            trainD, model), convert_to_windows(testD, model)
+        trainD, testD = convert_to_windows(trainD, model), convert_to_windows(testD, model)
 
     # Training phase
     if not args.test:
         print(f'{color.HEADER}Training {args.model} on {args.dataset}{color.ENDC}')
-        num_epochs = 50
+        num_epochs = 5
         e = epoch + 1
         start = time()
         for e in tqdm(list(range(epoch+1, epoch+num_epochs+1))):
-            lossT, lr = backprop(e, model, trainD, trainO,
-                                 optimizer, scheduler)
+            lossT, lr = backprop(e, model, trainD, trainO,optimizer, scheduler)
             accuracy_list.append((lossT, lr))
-        print(color.BOLD+'Training time: ' +
-              "{:10.4f}".format(time()-start)+' s'+color.ENDC)
+        print(color.BOLD+'Training time: ' +"{:10.4f}".format(time()-start)+' s'+color.ENDC)
         save_model(model, optimizer, scheduler, e, accuracy_list)
         plot_accuracies(accuracy_list, f'{args.model}_{args.dataset}')
 
@@ -375,15 +410,14 @@ if __name__ == '__main__':
     torch.zero_grad = True
     model.eval()
     print(f'{color.HEADER}Testing {args.model} on {args.dataset}{color.ENDC}')
-    loss, y_pred = backprop(0, model, testD, testO,
-                            optimizer, scheduler, training=False)
+    loss, y_pred = backprop(0, model, testD, testO, optimizer, scheduler, training=False)
 
     ### Plot curves
     if not args.test:
-	    if 'TranAD' in model.name: testO = torch.roll(testO, 1, 0) 
-	    plotter(f'{args.model}_{args.dataset}', testO.cpu(), y_pred, loss, labels)
+        if 'TranAD' in model.name: testO = torch.roll(testO, 1, 0)
+        plotter(f'{args.model}_{args.dataset}', testO.cpu(), y_pred, loss, labels)
 
-	### Scores
+    ### Scores
     df = pd.DataFrame()
     lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
     for i in range(loss.shape[1]):
@@ -391,6 +425,7 @@ if __name__ == '__main__':
         result, pred = pot_eval(lt, l, ls); preds.append(pred)
         result_df = pd.DataFrame([result])
         df = pd.concat([df, result_df], ignore_index=True)
+    save_anomaly_indices_as_json(preds, "anomaly_detection.json")
     lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
     labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
     result, _ = pot_eval(lossTfinal, lossFinal, labelsFinal)
